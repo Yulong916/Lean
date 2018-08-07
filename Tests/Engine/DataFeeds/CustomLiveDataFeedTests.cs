@@ -25,9 +25,11 @@ using System.Threading.Tasks;
 using NUnit.Framework;
 using QuantConnect.Algorithm;
 using QuantConnect.Algorithm.CSharp;
+using QuantConnect.Configuration;
 using QuantConnect.Data;
 using QuantConnect.Data.Auxiliary;
 using QuantConnect.Data.Custom;
+using QuantConnect.Data.Market;
 using QuantConnect.Data.UniverseSelection;
 using QuantConnect.Interfaces;
 using QuantConnect.Lean.Engine.DataFeeds;
@@ -65,7 +67,7 @@ namespace QuantConnect.Tests.Engine.DataFeeds
             timeProvider.SetCurrentTime(startDate);
 
             var dataPointsEmitted = 0;
-            var feed = RunLiveDataFeed<TestableQuandlFuture>(algorithm, startDate, symbols, timeProvider);
+            var feed = RunLiveDataFeed(algorithm, startDate, symbols, timeProvider);
 
             var lastFileWriteDate = DateTime.MinValue;
 
@@ -161,13 +163,94 @@ namespace QuantConnect.Tests.Engine.DataFeeds
             Assert.AreEqual(14 * tickers.Length, dataPointsEmitted);
         }
 
-        private static IDataFeed RunLiveDataFeed<T>(
+
+        [Test, Ignore("For this test you have to set the correct quandl auth token")]
+        public void RemoteDataDoesntIncreaseNumberOfSlices()
+        {
+            Config.Set("quandl-auth-token", "QUANDL_AUTH_TOKEN");
+
+            var startDate = new DateTime(2018, 4, 1);
+            var endDate = new DateTime(2018, 4, 20);
+            var algorithm = new QCAlgorithm();
+            var symbols = new List<Symbol>
+            {
+                algorithm.AddData<QuandlVix>("CBOE/VIX", Resolution.Daily).Symbol,
+                algorithm.AddEquity("SPY", Resolution.Daily).Symbol
+            };
+            algorithm.PostInitialize();
+
+            var timeProvider = new ManualTimeProvider(TimeZones.NewYork);
+            timeProvider.SetCurrentTime(startDate);
+
+            var dataPointsEmitted = 0;
+            var slicesEmitted = 0;
+            var lastTime = timeProvider.GetUtcNow().ConvertFromUtc(TimeZones.EasternStandard);
+            var dataQueueHandler = new FuncDataQueueHandler(fdqh =>
+            {
+                var time = timeProvider.GetUtcNow().ConvertFromUtc(TimeZones.EasternStandard);
+                if (time < lastTime + TimeSpan.FromDays(1)) return Enumerable.Empty<BaseData>();
+                lastTime = time;
+                var tick = new Tick(time, Symbols.SPY, 1.3m, 1.2m, 1.3m);
+                tick.TickType = TickType.Trade;
+                return new[] { tick };
+            });
+
+            var feed = RunLiveDataFeed(algorithm, startDate, symbols, timeProvider, dataQueueHandler);
+
+            // create a timer to advance time much faster than realtime and to simulate live Quandl data file updates
+            var timerInterval = TimeSpan.FromMilliseconds(100);
+            var timer = Ref.Create<Timer>(null);
+            timer.Value = new Timer(state =>
+            {
+                // stop the timer to prevent reentrancy
+                timer.Value.Change(Timeout.Infinite, Timeout.Infinite);
+
+                var currentTime = timeProvider.GetUtcNow().ConvertFromUtc(TimeZones.NewYork);
+
+                if (currentTime.Date > endDate.Date)
+                {
+                    feed.Exit();
+                    return;
+                }
+
+                timeProvider.Advance(TimeSpan.FromHours(3));
+
+                // restart the timer
+                timer.Value.Change(timerInterval, timerInterval);
+
+            }, null, TimeSpan.FromSeconds(2), timerInterval);
+
+            try
+            {
+                foreach (var timeSlice in feed)
+                {
+                    if (timeSlice.Slice.HasData)
+                    {
+                        slicesEmitted++;
+                        dataPointsEmitted += timeSlice.Slice.Values.Count;
+                        Assert.IsTrue(timeSlice.Slice.Values.Any(x => x.Symbol == symbols[0]), $"Slice doesn't contain {symbols[0]}");
+                        Assert.IsTrue(timeSlice.Slice.Values.Any(x => x.Symbol == symbols[1]), $"Slice doesn't contain {symbols[1]}");
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                Log.Trace($"Error: {exception}");
+            }
+
+            Assert.AreEqual(15, slicesEmitted);
+            Assert.AreEqual(15 * 2, dataPointsEmitted);
+        }
+
+        private static IDataFeed RunLiveDataFeed(
             IAlgorithm algorithm,
             DateTime startDate,
             IEnumerable<Symbol> symbols,
-            ITimeProvider timeProvider)
+            ITimeProvider timeProvider,
+            FuncDataQueueHandler funcDataQueueHandler  = null)
         {
-            var feed = new TestableLiveTradingDataFeed(new FuncDataQueueHandler(x => Enumerable.Empty<BaseData>()), timeProvider);
+            var feed = new TestableLiveTradingDataFeed(funcDataQueueHandler ?? new FuncDataQueueHandler(x => Enumerable.Empty<BaseData>()),
+                                                       timeProvider);
 
             var mapFileProvider = new LocalDiskMapFileProvider();
             feed.Initialize(algorithm, new LiveNodePacket(), new BacktestingResultHandler(),
@@ -175,7 +258,7 @@ namespace QuantConnect.Tests.Engine.DataFeeds
 
             foreach (var symbol in symbols)
             {
-                var config = new SubscriptionDataConfig(typeof(T), symbol, Resolution.Daily, TimeZones.NewYork, TimeZones.NewYork, false, true, false, true);
+                var config = algorithm.Securities[symbol].SubscriptionDataConfig;
                 var request = new SubscriptionRequest(false, null, algorithm.Securities[symbol], config, startDate, Time.EndOfTime);
                 feed.AddSubscription(request);
             }
