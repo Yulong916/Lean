@@ -66,8 +66,11 @@ namespace QuantConnect.Tests.Algorithm.Framework.Portfolio
         {
             SetPortfolioConstruction(language);
 
-            var insights = Enumerable.Empty<Insight>();
-            var actualTargets = _algorithm.PortfolioConstruction.CreateTargets(_algorithm, insights.ToArray());
+            var spyHolding = _algorithm.Portfolio[Symbols.SPY];
+            spyHolding.SetHoldings(spyHolding.Price, 0);
+            _algorithm.Portfolio.SetCash(_startingCash);
+
+            var actualTargets = _algorithm.PortfolioConstruction.CreateTargets(_algorithm, new Insight[0]);
 
             Assert.AreEqual(0, actualTargets.Count());
         }
@@ -91,14 +94,7 @@ namespace QuantConnect.Tests.Algorithm.Framework.Portfolio
             var insights = _algorithm.Securities.Keys.Select(x => GetInsight(x, direction, _algorithm.UtcTime));
             var actualTargets = _algorithm.PortfolioConstruction.CreateTargets(_algorithm, insights.ToArray());
 
-            Assert.AreEqual(expectedTargets.Count(), actualTargets.Count());
-
-            foreach (var expected in expectedTargets)
-            {
-                var actual = actualTargets.FirstOrDefault(x => x.Symbol == expected.Symbol);
-                Assert.IsNotNull(actual);
-                Assert.AreEqual(expected.Quantity, actual.Quantity);
-            }
+            AssertTargets(expectedTargets, actualTargets);
         }
 
         [TestCase(Language.CSharp, InsightDirection.Up)]
@@ -135,14 +131,7 @@ namespace QuantConnect.Tests.Algorithm.Framework.Portfolio
             });
             var actualTargets = _algorithm.PortfolioConstruction.CreateTargets(_algorithm, insights.ToArray());
 
-            Assert.AreEqual(expectedTargets.Count(), actualTargets.Count());
-
-            foreach (var expected in expectedTargets)
-            {
-                var actual = actualTargets.FirstOrDefault(x => x.Symbol == expected.Symbol);
-                Assert.IsNotNull(actual);
-                Assert.AreEqual(expected.Quantity, actual.Quantity);
-            }
+            AssertTargets(expectedTargets, actualTargets);
         }
 
         [Test]
@@ -152,7 +141,7 @@ namespace QuantConnect.Tests.Algorithm.Framework.Portfolio
         [TestCase(Language.Python, InsightDirection.Up)]
         [TestCase(Language.Python, InsightDirection.Down)]
         [TestCase(Language.Python, InsightDirection.Flat)]
-        public void AutomaticallyRemoveInvested(Language language, InsightDirection direction)
+        public void AutomaticallyRemoveInvestedWithNewInsights(Language language, InsightDirection direction)
         {
             SetPortfolioConstruction(language);
 
@@ -176,6 +165,34 @@ namespace QuantConnect.Tests.Algorithm.Framework.Portfolio
 
             var actualTargets = _algorithm.PortfolioConstruction.CreateTargets(_algorithm, insights.ToArray());
 
+            AssertTargets(expectedTargets, actualTargets);
+        }
+
+        [Test]
+        [TestCase(Language.CSharp)]
+        [TestCase(Language.Python)]
+        public void AutomaticallyRemoveInvestedWithoutNewInsights(Language language)
+        {
+            SetPortfolioConstruction(language);
+
+            var spyHolding = _algorithm.Portfolio[Symbols.SPY];
+            spyHolding.SetHoldings(spyHolding.Price, 100);
+            _algorithm.Portfolio.SetCash(_startingCash - spyHolding.HoldingsValue);
+
+            var expectedTargets = new List<IPortfolioTarget> { new PortfolioTarget(Symbols.SPY, 0) };
+
+            // Push old insight
+            var oldInsight = new[] { Insight.Price(Symbols.SPY, _algorithm.UtcTime.AddHours(-1), InsightDirection.Up) };
+            _algorithm.PortfolioConstruction.CreateTargets(_algorithm, oldInsight).ToArray();
+
+            // Create target from an empty insights array
+            var actualTargets = _algorithm.PortfolioConstruction.CreateTargets(_algorithm, new Insight[0]);
+
+            AssertTargets(expectedTargets, actualTargets);
+        }
+
+        private void AssertTargets(IEnumerable<IPortfolioTarget> expectedTargets, IEnumerable<IPortfolioTarget> actualTargets)
+        {
             Assert.AreEqual(expectedTargets.Count(), actualTargets.Count());
 
             foreach (var expected in expectedTargets)
@@ -185,8 +202,6 @@ namespace QuantConnect.Tests.Algorithm.Framework.Portfolio
                 Assert.AreEqual(expected.Quantity, actual.Quantity);
             }
         }
-
-
 
         private Security GetSecurity(Symbol symbol)
         {

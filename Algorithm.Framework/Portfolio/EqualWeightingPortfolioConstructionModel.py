@@ -44,7 +44,12 @@ class EqualWeightingPortfolioConstructionModel(PortfolioConstructionModel):
                 self.removedSymbols = None
 
         if len(insights) == 0:
-            return targets
+            for kvp in algorithm.Portfolio:
+                if kvp.Value.Invested and self.insightCollection.ContainsKey(kvp.Key):
+                    insightList = self.insightCollection[kvp.Key]
+                    if all([x.CloseTimeUtc < algorithm.UtcTime for x in insightList]):
+                        targets.append(PortfolioTarget(kvp.Key, 0))
+            return set(targets)
 
         # Get last insight that haven't expired of each symbol that is still in the universe
         activeInsights = list()

@@ -52,7 +52,17 @@ namespace QuantConnect.Algorithm.Framework.Portfolio
 
             if (insights.Length == 0)
             {
-                return targets;
+                return algorithm.Portfolio.Where(kvp => kvp.Value.Invested)
+                    .Where(kvp =>
+                    {
+                        List<Insight> insightList;
+                        if (_insightCollection.TryGetValue(kvp.Key, out insightList))
+                        {
+                            return insightList.All(x => x.CloseTimeUtc < algorithm.UtcTime);
+                        }
+                        return true;
+                    })
+                    .Select(kvp => new PortfolioTarget(kvp.Key, 0));
             }
 
             // Get last insight that haven't expired of each symbol that is still in the universe
@@ -84,7 +94,6 @@ namespace QuantConnect.Algorithm.Framework.Portfolio
                              where kvp.Value.Invested
                              where targets.All(x => kvp.Key != x.Symbol)
                              select new PortfolioTarget(kvp.Key, 0));
-
             return targets;
         }
 
